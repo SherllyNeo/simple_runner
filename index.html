@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Evie Runner</title>
 <style>
   html, body {
@@ -16,12 +17,16 @@
 
   #gameWrap {
     text-align: center;
+    max-width: 100%;
   }
 
   canvas {
     background: #f7f7f7;
     border-bottom: 2px solid #535353;
     display: block;
+    width: 100%;
+    max-width: min(80vw, 1800px);
+    height: auto;
   }
 
   #score {
@@ -41,12 +46,14 @@
   #canvasWrap {
     position: relative;
     display: inline-block;
+    max-width: min(80vw, 1800px);
+    width: 100%;
   }
 
   #duckBtn {
     position: absolute;
-    right: 10px;
-    bottom: 12px;
+    right: 3%;
+    bottom: 6%;
     width: 46px;
     height: 46px;
     border-radius: 50%;
