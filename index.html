@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Evie Runner</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #f7f7f7;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: monospace, sans-serif;
+  }
+
+  #gameWrap {
+    text-align: center;
+  }
+
+  canvas {
+    background: #f7f7f7;
+    border-bottom: 2px solid #535353;
+    display: block;
+  }
+
+  #score {
+    font-size: 20px;
+    colour: #535353;
+    margin-bottom: 8px;
+  }
+
+  #message {
+    position: relative;
+    top: -160px;
+    font-size: 22px;
+    colour: #535353;
+    display: none;
+  }
+
+  #canvasWrap {
+    position: relative;
+    display: inline-block;
+  }
+
+  #duckBtn {
+    position: absolute;
+    right: 10px;
+    bottom: 12px;
+    width: 46px;
+    height: 46px;
+    border-radius: 50%;
+    background: #e8e8e8;
+    border: 2px solid #535353;
+    colour: #535353;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+    cursor: pointer;
+    transition: background 0.08s, box-shadow 0.08s, transform 0.08s;
+  }
+
+  #duckBtn.active {
+    background: #ffd94a;
+    box-shadow: 0 0 12px 4px rgba(255, 217, 74, 0.9);
+    transform: scale(0.94);
+  }
+</style>
+</head>
+<body>
+
+<div id="gameWrap">
+  <div id="score">Score: 0&nbsp;&nbsp;&nbsp;High: 0</div>
+  <div id="canvasWrap">
+    <canvas id="game" width="1800" height="200"></canvas>
+    <div id="duckBtn">&#9660;</div>
+  </div>
+  <div id="message">Game Over - You've been munched!! press Space or tap to restart</div>
+</div>
+
+<script>
+const PLAYER_IMG_SRC = "player.png";  
+const CHASER_IMG_SRC = "chaser.png";
+
+const CACTUS_COLORS = ["#4b7a4b", "#3d6b35"];
+const BIRD_COLORS = ["#8a4a4a", "#a5613f"];
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const scoreEl = document.getElementById("score");
+const messageEl = document.getElementById("message");
+const duckBtn = document.getElementById("duckBtn");
+
+const GROUND_Y = 160;    
+const GRAVITY = 0.6;
+const JUMP_VELOCITY = -11;
+
+function loadImage(src) {
+  if (!src) return null;
+  const img = new Image();
+  img.src = src;
+  return img;
+}
+const playerImg = loadImage(PLAYER_IMG_SRC);
+const chaserImg = loadImage(CHASER_IMG_SRC);
+
+const player = {
+  x: 220,
+  y: GROUND_Y - 40,
+  width: 40*1.4,
+  height: 60*1.4,
+  baseHeight: 40,
+  duckHeight: 20,
+  vy: 0,
+  jumping: false,
+  ducking: false
+};
+
+function jump() {
+  if (!player.jumping && !player.ducking && !gameOver) {
+    player.vy = JUMP_VELOCITY;
+    player.jumping = true;
+  }
+}
+
+function startDuck() {
+  if (player.jumping || gameOver) return; 
+  if (player.ducking) return;
+  player.ducking = true;
+  player.height = player.duckHeight;
+  player.y = GROUND_Y - player.duckHeight;
+}
+
+function endDuck() {
+  if (!player.ducking) return;
+  player.ducking = false;
+  player.height = player.baseHeight;
+  player.y = GROUND_Y - player.baseHeight;
+}
+const CHASER_X = 20;           // fixed px from the left edge of the canvas
+const PLAYER_DRAW_OFFSET = 60;
+
+const chaser = {
+  width: 40,
+  height: 60
+};
+
+let obstacles = [];
+
+let speed = 6;
+
+const BIRD_HEIGHT = 24;
+const BIRD_WIDTH = 34;
+
+const HEAD_Y = GROUND_Y - player.baseHeight;      
+const DUCK_TOP_Y = GROUND_Y - player.duckHeight;  
+
+const BIRD_LEVELS = [
+  { name: "high", y: HEAD_Y - BIRD_HEIGHT - 6 },  
+  { name: "mid",  y: DUCK_TOP_Y - BIRD_HEIGHT - 4 },
+  { name: "low",  y: GROUND_Y - BIRD_HEIGHT - 4 }  
+];
+
+const MIN_GAP_TIME = 0.5;   
+const MAX_GAP_TIME = 1.5;  
+const FPS_ASSUMPTION = 60;
+
+function spawnObstacle() {
+  const isBird = Math.random() < 0.2;
+
+  let width, height, y, type, colourIndex;
+
+  if (isBird) {
+    const level = BIRD_LEVELS[Math.floor(Math.random() * BIRD_LEVELS.length)];
+    type = "bird";
+    width = BIRD_WIDTH;
+    height = BIRD_HEIGHT;
+    y = level.y;
+    colourIndex = Math.floor(Math.random() * BIRD_COLORS.length);
+  } else {
+    type = "cactus";
+    height = 30 + Math.random() * 30; // 30-60px tall
+    width = 20 + Math.random() * 15;  // 20-35px wide
+    y = GROUND_Y - height;
+    colourIndex = Math.floor(Math.random() * CACTUS_COLORS.length);
+  }
+
+  const lastObstacle = obstacles[obstacles.length - 1];
+  let startX = canvas.width + 20;
+
+  if (lastObstacle) {
+    const gapSeconds = MIN_GAP_TIME + Math.random() * (MAX_GAP_TIME - MIN_GAP_TIME);
+    const gapPixels = gapSeconds * speed * FPS_ASSUMPTION;
+    startX = Math.max(startX, lastObstacle.x + lastObstacle.width + gapPixels);
+  }
+
+  obstacles.push({
+    x: startX,
+    y,
+    width,
+    height,
+    type,
+    colourIndex
+  });
+}
+
+let score = 0;
+let highScore = 0;
+let gameOver = false;
+let frame = 0;
+let framesSinceLastSpawn = 0;
+
+function resetGame() {
+  player.y = GROUND_Y - player.baseHeight;
+  player.height = player.baseHeight;
+  player.vy = 0;
+  player.jumping = false;
+  player.ducking = false;
+  duckButtonHeld = false;
+  duckKeyHeld = false;
+  duckBtn.classList.remove("active");
+  obstacles = [];
+  speed = 6;
+  score = 0;
+  gameOver = false;
+  frame = 0;
+  framesSinceLastSpawn = 0;
+  messageEl.style.display = "none";
+  spawnObstacle();
+  requestAnimationFrame(loop);
+}
+
+let duckKeyHeld = false;
+let duckButtonHeld = false;
+
+function refreshDuckState() {
+  if (gameOver) return;
+  if (duckKeyHeld || duckButtonHeld) {
+    startDuck();
+  } else {
+    endDuck();
+  }
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.code === "Space" || e.code === "ArrowUp") {
+    e.preventDefault();
+    if (gameOver) {
+      resetGame();
+    } else {
+      jump();
+    }
+  } else if (e.code === "ArrowDown") {
+    e.preventDefault();
+    duckKeyHeld = true;
+    refreshDuckState();
+  }
+});
+document.addEventListener("keyup", (e) => {
+  if (e.code === "ArrowDown") {
+    e.preventDefault();
+    duckKeyHeld = false;
+    refreshDuckState();
+  }
+});
+canvas.addEventListener("mousedown", () => {
+  if (gameOver) resetGame(); else jump();
+});
+canvas.addEventListener("touchstart", (e) => {
+  e.preventDefault();
+  if (gameOver) resetGame(); else jump();
+});
+
+duckBtn.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  e.stopPropagation(); // don't trigger the canvas's jump/restart handler
+  duckButtonHeld = true;
+  refreshDuckState();
+});
+function releaseDuckButton(e) {
+  e.preventDefault();
+  duckButtonHeld = false;
+  refreshDuckState();
+}
+duckBtn.addEventListener("pointerup", releaseDuckButton);
+duckBtn.addEventListener("pointercancel", releaseDuckButton);
+duckBtn.addEventListener("pointerleave", releaseDuckButton);
+
+function isColliding(a, b) {
+  const pad = 6*1.5; 
+  return (
+    a.x + pad < b.x + b.width - pad &&
+    a.x + a.width - pad > b.x + pad &&
+    a.y + pad < b.y + b.height - pad &&
+    a.y + a.height - pad > b.y + pad
+  );
+}
+
+function drawGround() {
+  ctx.strokeStyle = "#535353";
+  ctx.beginPath();
+  ctx.moveTo(0, GROUND_Y);
+  ctx.lineTo(canvas.width, GROUND_Y);
+  ctx.stroke();
+}
+
+function drawPlayer() {
+  if (playerImg && playerImg.complete && playerImg.naturalWidth > 0) {
+    ctx.drawImage(playerImg, player.x + PLAYER_DRAW_OFFSET, player.y, player.width, player.height);
+  } else {
+    ctx.fillStyle = player.ducking ? "#8a8a8a" : "#535353";
+    ctx.fillRect(player.x, player.y, player.width, player.height);
+  }
+}
+
+function drawChaser() {
+  const x = CHASER_X;
+  const y = GROUND_Y - chaser.height;
+
+  if (chaserImg && chaserImg.complete && chaserImg.naturalWidth > 0) {
+    ctx.drawImage(chaserImg, x, y, chaser.width, chaser.height);
+  } else {
+    ctx.fillStyle = "#7a2e2e";
+    ctx.fillRect(x, y, chaser.width, chaser.height);
+  }
+}
+
+function drawObstacle(o) {
+  const palette = o.type === "bird" ? BIRD_COLORS : CACTUS_COLORS;
+  ctx.fillStyle = palette[o.colourIndex];
+
+  if (o.type === "bird") {
+    ctx.beginPath();
+    ctx.moveTo(o.x, o.y + o.height / 2);
+    ctx.lineTo(o.x + o.width / 2, o.y);
+    ctx.lineTo(o.x + o.width, o.y + o.height / 2);
+    ctx.lineTo(o.x + o.width / 2, o.y + o.height);
+    ctx.closePath();
+    ctx.fill();
+  } else {
+    ctx.fillRect(o.x, o.y, o.width, o.height);
+  }
+}
+
+function loop() {
+  if (gameOver) return;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  player.vy += GRAVITY;
+  player.y += player.vy;
+  if (player.y > GROUND_Y - player.height) {
+    player.y = GROUND_Y - player.height;
+    player.vy = 0;
+    player.jumping = false;
+    if (duckKeyHeld || duckButtonHeld) startDuck();
+  }
+
+  for (const o of obstacles) {
+    o.x -= speed;
+  }
+
+  const monsterRightEdge = CHASER_X + chaser.width;
+  obstacles = obstacles.filter(o => o.x + o.width > monsterRightEdge);
+
+  framesSinceLastSpawn++;
+  if (framesSinceLastSpawn > 10) {
+    const lastObstacle = obstacles[obstacles.length - 1];
+    if (!lastObstacle || lastObstacle.x < canvas.width - 60) {
+      if (Math.random() < 0.03) {
+        spawnObstacle();
+        framesSinceLastSpawn = 0;
+      }
+    }
+  }
+
+  for (const o of obstacles) {
+    if (isColliding(player, o)) {
+      endGame();
+      return;
+    }
+  }
+
+  frame++;
+  if (frame % 6 === 0) score++;
+  if (frame % 500 === 0) speed += 0.5; // gentle ramp-up
+
+  drawGround();
+  drawChaser();
+  drawPlayer();
+  obstacles.forEach(drawObstacle);
+    scoreEl.textContent = `Speed: ${speed}      Score: ${score}     High: ${Math.max(score, highScore)}`;
+  duckBtn.classList.toggle("active", player.ducking);
+
+  requestAnimationFrame(loop);
+}
+
+function endGame() {
+  gameOver = true;
+  highScore = Math.max(score, highScore);
+  messageEl.style.display = "block";
+  scoreEl.textContent = `Score: ${score}   High: ${highScore}`;
+}
+
+resetGame();
+</script>
+
+</body>
+</html>
