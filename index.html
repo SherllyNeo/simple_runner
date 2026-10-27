@@ -2,20 +2,31 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Evie Runner</title>
 <style>
   html, body {
     margin: 0;
     height: 100%;
     background: #f7f7f7;
-    display: flex;
-    align-items: center;
-    justify-content: center;
     font-family: monospace, sans-serif;
+    overflow: hidden;
+    overscroll-behavior: none;       /* no pull-to-refresh / rubber-banding */
+    touch-action: none;              /* no scrolling, pinch or double-tap zoom */
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
   }
 
+  /* The whole screen is the game surface (tap anywhere to jump). */
   #gameWrap {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
     text-align: center;
   }
 
@@ -26,34 +37,40 @@
   }
 
   #score {
-    font-size: 20px;
-    colour: #535353;
+    font-size: clamp(13px, 3.6vw, 20px);
+    color: #535353;
     margin-bottom: 8px;
-  }
-
-  #message {
-    position: relative;
-    top: -160px;
-    font-size: 22px;
-    colour: #535353;
-    display: none;
   }
 
   #canvasWrap {
     position: relative;
-    display: inline-block;
   }
 
+  /* Overlay centred on the canvas, whatever size the canvas ends up. */
+  #message {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 0 12px;
+    font-size: clamp(15px, 4.5vw, 22px);
+    color: #535353;
+    white-space: pre-line;
+    pointer-events: none;
+  }
+
+  /* Desktop: small button in the canvas's bottom-right corner. */
   #duckBtn {
     position: absolute;
-    right: 3%;
-    bottom: 6%;
+    right: 10px;
+    bottom: 12px;
     width: 46px;
     height: 46px;
     border-radius: 50%;
     background: #e8e8e8;
     border: 2px solid #535353;
-    colour: #535353;
+    color: #535353;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -70,6 +87,19 @@
     box-shadow: 0 0 12px 4px rgba(255, 217, 74, 0.9);
     transform: scale(0.94);
   }
+
+  /* Touch screens: big thumb-sized button pinned to the bottom-right of
+     the SCREEN (works in portrait and landscape). */
+  @media (pointer: coarse) {
+    #duckBtn {
+      position: fixed;
+      right: 16px;
+      bottom: 16px;
+      width: clamp(64px, 18vmin, 88px);
+      height: clamp(64px, 18vmin, 88px);
+      font-size: clamp(28px, 8vmin, 40px);
+    }
+  }
 </style>
 </head>
 <body>
@@ -77,43 +107,64 @@
 <div id="gameWrap">
   <div id="score">Score: 0&nbsp;&nbsp;&nbsp;High: 0</div>
   <div id="canvasWrap">
-    <canvas id="game" width="1800" height="200"></canvas>
-    <div id="duckBtn">&#9660;</div>
+    <canvas id="game"></canvas>
+    <div id="message"></div>
+    <div id="duckBtn" role="button" aria-label="Duck">&#9660;</div>
   </div>
-  <div id="message">Game Over - You've been munched!! press Space or tap to restart</div>
 </div>
 
 <script>
-const PLAYER_IMG_SRC = "player.png";  
+const PLAYER_IMG_SRC = "player.png";
 const CHASER_IMG_SRC = "chaser.png";
 
+// Obstacles are plain colored shapes — no image slots. Each
+// array is a palette; a random color from the matching array is
+// picked per obstacle, so you still get some visual variety.
 const CACTUS_COLORS = ["#4b7a4b", "#3d6b35"];
 const BIRD_COLORS = ["#8a4a4a", "#a5613f"];
 
+const START_TEXT = "Tap or press Space to start\nTap / Space = jump · hold ▼ / ↓ = duck";
+const GAME_OVER_TEXT = "Game Over — press Space or tap to restart";
+
+const GAME_H = 200;
+const DESIGN_W = 1800;     // world width your player/chaser positions were tuned for
+const MIN_WORLD_W = 600;   // narrowest world we'll show (portrait phones)
+const MAX_SCALE = 1;       // CSS px per world unit on big screens (raise for bigger sprites)
+
+let worldW = DESIGN_W;     // current world width, in game units
+
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
+const gameWrap = document.getElementById("gameWrap");
 const scoreEl = document.getElementById("score");
 const messageEl = document.getElementById("message");
 const duckBtn = document.getElementById("duckBtn");
 
-const GROUND_Y = 160;    
+const GROUND_Y = 160;
 const GRAVITY = 0.6;
 const JUMP_VELOCITY = -11;
 
 function loadImage(src) {
   if (!src) return null;
   const img = new Image();
+  img.addEventListener("load", () => draw()); // repaint idle screens once art arrives
   img.src = src;
   return img;
 }
 const playerImg = loadImage(PLAYER_IMG_SRC);
 const chaserImg = loadImage(CHASER_IMG_SRC);
 
+// Your original positions (tuned for an 1800-wide world). On narrower
+// screens they shrink proportionally — see applyLayout().
+const PLAYER_X = 220;
+const PLAYER_DRAW_OFFSET = 60;
+let drawOffset = PLAYER_DRAW_OFFSET;
+
 const player = {
-  x: 220,
+  x: PLAYER_X,
   y: GROUND_Y - 40,
-  width: 40*1.4,
-  height: 60*1.4,
+  width: 40,
+  height: 60,
   baseHeight: 40,
   duckHeight: 20,
   vy: 0,
@@ -129,7 +180,7 @@ function jump() {
 }
 
 function startDuck() {
-  if (player.jumping || gameOver) return; 
+  if (player.jumping || gameOver) return;
   if (player.ducking) return;
   player.ducking = true;
   player.height = player.duckHeight;
@@ -142,38 +193,60 @@ function endDuck() {
   player.height = player.baseHeight;
   player.y = GROUND_Y - player.baseHeight;
 }
+
 const CHASER_X = 20;           // fixed px from the left edge of the canvas
-const PLAYER_DRAW_OFFSET = 60;
 
 const chaser = {
   width: 40,
   height: 60
 };
 
+function applyLayout() {
+  const k = Math.min(1, worldW / DESIGN_W);   // 1 on wide screens, smaller on narrow ones
+  player.x = Math.round(PLAYER_X * k);
+  drawOffset = Math.round(PLAYER_DRAW_OFFSET * k);
+}
+
 let obstacles = [];
 
 let speed = 6;
 
+const HITBOX_PAD = 8;   // shared by isColliding() and the bird heights below
+
 const BIRD_HEIGHT = 24;
 const BIRD_WIDTH = 34;
 
-const HEAD_Y = GROUND_Y - player.baseHeight;      
-const DUCK_TOP_Y = GROUND_Y - player.duckHeight;  
+// Bird heights are worked out from the player's own numbers (and the
+// collision padding) instead of hand-picked pixels, so they stay correct
+// if you change baseHeight / duckHeight / jump strength / padding.
+const STAND_TOP_Y = GROUND_Y - player.baseHeight;                 // top of head, standing
+const DUCK_TOP_Y  = GROUND_Y - player.duckHeight;                 // top of head, ducking
+const JUMP_RISE   = (JUMP_VELOCITY * JUMP_VELOCITY) / (2 * GRAVITY); // ~how high a jump lifts you
 
 const BIRD_LEVELS = [
-  { name: "high", y: HEAD_Y - BIRD_HEIGHT - 6 },  
-  { name: "mid",  y: DUCK_TOP_Y - BIRD_HEIGHT - 4 },
-  { name: "low",  y: GROUND_Y - BIRD_HEIGHT - 4 }  
+  // HIGH — "don't jump": level with the player's body at the top of a
+  // jump. Standing or ducking passes safely underneath; a jump timed to
+  // clear an obstacle flies straight into it.
+  { name: "high", y: STAND_TOP_Y - JUMP_RISE + (player.baseHeight - BIRD_HEIGHT) / 2 },
+
+  // MID — "duck": the bird's bottom edge sits halfway through the window
+  // that hits a standing player (after padding) but misses a ducking one.
+  // (A well-timed jump also clears it.)
+  { name: "mid",  y: (STAND_TOP_Y + DUCK_TOP_Y) / 2 + 2 * HITBOX_PAD - BIRD_HEIGHT },
+
+  // LOW — sits on the ground like a cactus: hits standing AND ducking,
+  // so only a jump clears it.
+  { name: "low",  y: GROUND_Y - BIRD_HEIGHT }
 ];
 
-const MIN_GAP_TIME = 0.5;   
-const MAX_GAP_TIME = 1.5;  
+const MIN_GAP_TIME = 0.5;
+const MAX_GAP_TIME = 1.5;
 const FPS_ASSUMPTION = 60;
 
 function spawnObstacle() {
   const isBird = Math.random() < 0.2;
 
-  let width, height, y, type, colourIndex;
+  let width, height, y, type, colorIndex;
 
   if (isBird) {
     const level = BIRD_LEVELS[Math.floor(Math.random() * BIRD_LEVELS.length)];
@@ -181,17 +254,17 @@ function spawnObstacle() {
     width = BIRD_WIDTH;
     height = BIRD_HEIGHT;
     y = level.y;
-    colourIndex = Math.floor(Math.random() * BIRD_COLORS.length);
+    colorIndex = Math.floor(Math.random() * BIRD_COLORS.length);
   } else {
     type = "cactus";
     height = 30 + Math.random() * 30; // 30-60px tall
     width = 20 + Math.random() * 15;  // 20-35px wide
     y = GROUND_Y - height;
-    colourIndex = Math.floor(Math.random() * CACTUS_COLORS.length);
+    colorIndex = Math.floor(Math.random() * CACTUS_COLORS.length);
   }
 
   const lastObstacle = obstacles[obstacles.length - 1];
-  let startX = canvas.width + 20;
+  let startX = worldW + 20;
 
   if (lastObstacle) {
     const gapSeconds = MIN_GAP_TIME + Math.random() * (MAX_GAP_TIME - MIN_GAP_TIME);
@@ -205,7 +278,7 @@ function spawnObstacle() {
     width,
     height,
     type,
-    colourIndex
+    colorIndex
   });
 }
 
@@ -215,7 +288,19 @@ let gameOver = false;
 let frame = 0;
 let framesSinceLastSpawn = 0;
 
-function resetGame() {
+let duckKeyHeld = false;
+let duckButtonHeld = false;
+let canRestartAt = 0;   // briefly ignore taps after dying so frantic tapping doesn't skip the game-over screen
+
+function showMessage(text) {
+  messageEl.textContent = text;
+  messageEl.style.display = "flex";
+}
+function hideMessage() {
+  messageEl.style.display = "none";
+}
+
+function resetState() {
   player.y = GROUND_Y - player.baseHeight;
   player.height = player.baseHeight;
   player.vy = 0;
@@ -227,16 +312,26 @@ function resetGame() {
   obstacles = [];
   speed = 6;
   score = 0;
-  gameOver = false;
   frame = 0;
   framesSinceLastSpawn = 0;
-  messageEl.style.display = "none";
+  lastHud = "";
   spawnObstacle();
-  requestAnimationFrame(loop);
 }
 
-let duckKeyHeld = false;
-let duckButtonHeld = false;
+function resetGame() {
+  resetState();
+  gameOver = false;
+  hideMessage();
+  startLoop();
+}
+
+function tryRestart() {
+  if (performance.now() >= canRestartAt) resetGame();
+}
+
+function pressJump() {
+  if (gameOver) tryRestart(); else jump();
+}
 
 function refreshDuckState() {
   if (gameOver) return;
@@ -247,11 +342,17 @@ function refreshDuckState() {
   }
 }
 
+function releaseAllInput() {
+  duckKeyHeld = false;
+  duckButtonHeld = false;
+  refreshDuckState();
+}
+
 document.addEventListener("keydown", (e) => {
   if (e.code === "Space" || e.code === "ArrowUp") {
     e.preventDefault();
     if (gameOver) {
-      resetGame();
+      if (!e.repeat) tryRestart();
     } else {
       jump();
     }
@@ -268,17 +369,18 @@ document.addEventListener("keyup", (e) => {
     refreshDuckState();
   }
 });
-canvas.addEventListener("mousedown", () => {
-  if (gameOver) resetGame(); else jump();
-});
-canvas.addEventListener("touchstart", (e) => {
+
+gameWrap.addEventListener("pointerdown", (e) => {
+  if (e.button > 0) return;
   e.preventDefault();
-  if (gameOver) resetGame(); else jump();
+  pressJump();
 });
+gameWrap.addEventListener("contextmenu", (e) => e.preventDefault()); // no long-press menu
 
 duckBtn.addEventListener("pointerdown", (e) => {
   e.preventDefault();
-  e.stopPropagation(); // don't trigger the canvas's jump/restart handler
+  e.stopPropagation(); // don't also trigger the jump/restart handler above
+  if (gameOver) { tryRestart(); return; }
   duckButtonHeld = true;
   refreshDuckState();
 });
@@ -291,8 +393,22 @@ duckBtn.addEventListener("pointerup", releaseDuckButton);
 duckBtn.addEventListener("pointercancel", releaseDuckButton);
 duckBtn.addEventListener("pointerleave", releaseDuckButton);
 
+window.addEventListener("blur", releaseAllInput);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    releaseAllInput();
+  } else {
+    lastTime = performance.now(); // don't fast-forward the time we were away
+    accumulator = 0;
+  }
+});
+
+function playerHitbox() {
+  return { x: player.x + drawOffset, y: player.y, width: player.width, height: player.height };
+}
+
 function isColliding(a, b) {
-  const pad = 6*1.5; 
+  const pad = HITBOX_PAD;
   return (
     a.x + pad < b.x + b.width - pad &&
     a.x + a.width - pad > b.x + pad &&
@@ -305,16 +421,16 @@ function drawGround() {
   ctx.strokeStyle = "#535353";
   ctx.beginPath();
   ctx.moveTo(0, GROUND_Y);
-  ctx.lineTo(canvas.width, GROUND_Y);
+  ctx.lineTo(worldW, GROUND_Y);
   ctx.stroke();
 }
 
 function drawPlayer() {
   if (playerImg && playerImg.complete && playerImg.naturalWidth > 0) {
-    ctx.drawImage(playerImg, player.x + PLAYER_DRAW_OFFSET, player.y, player.width, player.height);
+    ctx.drawImage(playerImg, player.x + drawOffset, player.y, player.width, player.height);
   } else {
     ctx.fillStyle = player.ducking ? "#8a8a8a" : "#535353";
-    ctx.fillRect(player.x, player.y, player.width, player.height);
+    ctx.fillRect(player.x + drawOffset, player.y, player.width, player.height);
   }
 }
 
@@ -332,7 +448,7 @@ function drawChaser() {
 
 function drawObstacle(o) {
   const palette = o.type === "bird" ? BIRD_COLORS : CACTUS_COLORS;
-  ctx.fillStyle = palette[o.colourIndex];
+  ctx.fillStyle = palette[o.colorIndex];
 
   if (o.type === "bird") {
     ctx.beginPath();
@@ -347,11 +463,25 @@ function drawObstacle(o) {
   }
 }
 
-function loop() {
-  if (gameOver) return;
+function draw() {
+  ctx.clearRect(0, 0, worldW, GAME_H);
+  drawGround();
+  drawChaser();
+  drawPlayer();
+  obstacles.forEach(drawObstacle);
+}
 
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+let lastHud = "";
+function updateHud() {
+  const txt = `Speed: ${speed}      Score: ${score}     High: ${Math.max(score, highScore)}`;
+  if (txt !== lastHud) {
+    scoreEl.textContent = txt;
+    lastHud = txt;
+  }
+  duckBtn.classList.toggle("active", player.ducking);
+}
 
+function update() {
   player.vy += GRAVITY;
   player.y += player.vy;
   if (player.y > GROUND_Y - player.height) {
@@ -371,7 +501,7 @@ function loop() {
   framesSinceLastSpawn++;
   if (framesSinceLastSpawn > 10) {
     const lastObstacle = obstacles[obstacles.length - 1];
-    if (!lastObstacle || lastObstacle.x < canvas.width - 60) {
+    if (!lastObstacle || lastObstacle.x < worldW - 60) {
       if (Math.random() < 0.03) {
         spawnObstacle();
         framesSinceLastSpawn = 0;
@@ -380,7 +510,7 @@ function loop() {
   }
 
   for (const o of obstacles) {
-    if (isColliding(player, o)) {
+    if (isColliding(playerHitbox(), o)) {
       endGame();
       return;
     }
@@ -389,25 +519,78 @@ function loop() {
   frame++;
   if (frame % 6 === 0) score++;
   if (frame % 500 === 0) speed += 0.5; // gentle ramp-up
+}
 
-  drawGround();
-  drawChaser();
-  drawPlayer();
-  obstacles.forEach(drawObstacle);
-    scoreEl.textContent = `Speed: ${speed}      Score: ${score}     High: ${Math.max(score, highScore)}`;
-  duckBtn.classList.toggle("active", player.ducking);
+const STEP_MS = 1000 / 60;
+let lastTime = 0;
+let accumulator = 0;
+let rafId = null;
 
-  requestAnimationFrame(loop);
+function startLoop() {
+  if (rafId !== null) return;
+  lastTime = performance.now();
+  accumulator = 0;
+  rafId = requestAnimationFrame(frameLoop);
+}
+
+function frameLoop(now) {
+  rafId = null;
+  if (gameOver) return;
+
+  accumulator += Math.max(0, Math.min(now - lastTime, 100));
+  lastTime = now;
+
+  while (accumulator >= STEP_MS - 1 && !gameOver) {
+    update();
+    accumulator -= STEP_MS;
+  }
+  if (gameOver) return; // keep the last drawn frame on screen
+
+  draw();
+  updateHud();
+  rafId = requestAnimationFrame(frameLoop);
 }
 
 function endGame() {
   gameOver = true;
   highScore = Math.max(score, highScore);
-  messageEl.style.display = "block";
+  canRestartAt = performance.now() + 400;
+  lastHud = "";
+  showMessage(GAME_OVER_TEXT);
   scoreEl.textContent = `Score: ${score}   High: ${highScore}`;
 }
 
-resetGame();
+let sizeKey = "";
+function resizeCanvas() {
+  const vw = window.innerWidth;
+  const scale = Math.min(MAX_SCALE, vw / MIN_WORLD_W);
+  const w = Math.min(DESIGN_W, Math.round(vw / scale));
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+
+  const key = w + "|" + scale + "|" + dpr;
+  if (key === sizeKey) return;
+  sizeKey = key;
+
+  worldW = w;
+  const cssW = w * scale;
+  const cssH = GAME_H * scale;
+  canvas.style.width = cssW + "px";
+  canvas.style.height = cssH + "px";
+  canvas.width = Math.round(cssW * dpr);   // (re)sizing clears the canvas...
+  canvas.height = Math.round(cssH * dpr);
+  ctx.setTransform(canvas.width / worldW, 0, 0, canvas.height / GAME_H, 0, 0);
+
+  applyLayout();
+  draw();                                  // ...so repaint straight away
+}
+window.addEventListener("resize", resizeCanvas);
+window.addEventListener("orientationchange", resizeCanvas);
+
+resizeCanvas();
+resetState();
+gameOver = true;
+showMessage(START_TEXT);
+draw();
 </script>
 
 </body>
